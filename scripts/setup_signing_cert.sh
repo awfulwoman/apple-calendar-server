@@ -15,15 +15,25 @@ set -euo pipefail
 # LaunchAgent runs as (so the key lands in that user's login keychain). The
 # private key never leaves the keychain. Idempotent: a no-op if it already exists.
 #
+# A self-signed cert must also be TRUSTED for code signing before codesign will
+# use it — that requires admin rights, so it's a SEPARATE step (the infra role
+# does it with `sudo security add-trusted-cert`; see the note printed at the end).
+# This script persists the public cert to CERT_STORE so that step can find it.
+#
 # Automation (infra): pass KEYCHAIN_PASSWORD (e.g. from Ansible vault) so the
 # key partition list is set non-interactively. Without it, the first codesign
 # use will show a one-time keychain prompt — click "Always Allow".
 
 IDENTITY_CN="awfulwoman-apple-calendar-server-signing"
 KEYCHAIN="${KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+CERT_STORE="${CERT_STORE:-$HOME/.local/state/apple-calendar-server/signing-cert.pem}"
 VALID_DAYS="${VALID_DAYS:-3650}"
 
+mkdir -p "$(dirname "$CERT_STORE")"
+
 if security find-certificate -c "$IDENTITY_CN" "$KEYCHAIN" >/dev/null 2>&1; then
+    # Make sure the public cert is on disk for the trust step, even on re-runs.
+    [ -f "$CERT_STORE" ] || security find-certificate -c "$IDENTITY_CN" -p "$KEYCHAIN" > "$CERT_STORE"
     echo "Signing identity '$IDENTITY_CN' already present in $KEYCHAIN — nothing to do."
     exit 0
 fi
@@ -48,11 +58,18 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
     -days "$VALID_DAYS" -config "$tmp/openssl.cnf" 2>/dev/null
 
-openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
-    -out "$tmp/identity.p12" -passout pass:
+# Import the cert and (unencrypted) private key straight from PEM. We deliberately
+# avoid a PKCS12 bundle: OpenSSL 3 exports an empty-password .p12 whose MAC macOS's
+# `security import` rejects ("MAC verification failed during PKCS12 import"). macOS
+# forms a code-signing identity from the matching cert+key in one keychain.
+# -T /usr/bin/codesign: let codesign use the imported key.
+security import "$tmp/cert.pem" -k "$KEYCHAIN" -T /usr/bin/codesign
+security import "$tmp/key.pem"  -k "$KEYCHAIN" -T /usr/bin/codesign
 
-# -T /usr/bin/codesign: let codesign use this key.
-security import "$tmp/identity.p12" -k "$KEYCHAIN" -P "" -T /usr/bin/codesign
+# Persist the PUBLIC cert so the role's admin-domain trust step can reference it.
+# (The private key never leaves the keychain.)
+cp "$tmp/cert.pem" "$CERT_STORE"
+chmod 644 "$CERT_STORE"
 
 # Let codesign reach the private key without an interactive prompt each run.
 if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
@@ -64,4 +81,8 @@ else
 fi
 
 echo "Created self-signed code-signing identity '$IDENTITY_CN' (valid ${VALID_DAYS} days)."
-echo "Next: run scripts/sign_runtime.sh (install_service.sh does this for you)."
+echo "Public cert stored at $CERT_STORE."
+echo "NEXT: it must be trusted for code signing before codesign will use it —"
+echo "  sudo security add-trusted-cert -d -r trustRoot -p codeSign \\"
+echo "    -k /Library/Keychains/System.keychain $CERT_STORE"
+echo "(the infra role does this automatically). Then run scripts/sign_runtime.sh."
