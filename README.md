@@ -1,0 +1,119 @@
+# apple-calendar-server
+
+A small authorised REST API in front of the real macOS Calendar app (via
+`EventKit`), so [`gateway`](https://github.com/awfulwoman/gateway)'s calendar can be
+backed by the Calendar app the user actually uses — on any device, via Siri, the
+widget, or the Calendar UI — instead of a synthetic store nothing else syncs with.
+It's the sibling of
+[`apple-reminders-server`](https://github.com/awfulwoman/apple-reminders-server) and
+follows the same principles (thin EventKit wrapper, sidecar SQLite for bookkeeping,
+LWW + tombstones, native-edit adoption, stable code-signed interpreter). Runs on
+**Malcolm** (`apple-macmini-m4-16gb-malcolm`), the always-on Mac.
+
+**Multiple calendars** are first-class: events carry a `calendar`, `GET /events`
+can be filtered by it, writes create/target a named calendar, and `GET /calendars`
+lists the writable ones.
+
+## Why a sidecar database
+
+EventKit has no equivalent of CalDAV's `STATUS:CANCELLED` tombstone, no custom
+properties for an app-authoritative `updated_at`, and no client-assignable UID (its
+`calendarItemIdentifier` is system-assigned). `apple_calendar_server/sidecar.py`
+keeps a small local SQLite table — `id ↔ calendarItemIdentifier`, `updated_at`,
+`deleted`/last-known content — purely for that bookkeeping. The event *content*
+always lives in the real Calendar.app; the sidecar is never authoritative for it.
+
+Events created outside the API (Siri, another device) are transparently **adopted**
+the first time they're observed — see the `store.py` module docstring.
+
+## Events are fetched over a window
+
+Unlike reminders, EventKit has no "all events" query — events are fetched over a
+bounded date range (`predicateForEventsWithStartDate:endDate:calendars:`, capped at
+~4 years). So `GET /events` always works over a window (`start`/`end`, defaulting to
+`now − 30d … now + 365d`). One consequence: `GET /events` only reconciles *native
+deletions* for events whose start falls inside the queried window — an event outside
+the window is out of range, not deleted. `GET /events/{id}` looks up by identifier
+regardless of date, so it always sees a genuine deletion.
+
+## Event shape
+
+```json
+{
+  "id": "…", "title": "Standup", "notes": null, "location": "Zoom",
+  "all_day": false,
+  "start": "2026-08-01T09:00:00Z", "end": "2026-08-01T09:30:00Z",
+  "calendar": "Work", "url": null,
+  "created_at": "…", "updated_at": "…", "deleted": false
+}
+```
+
+For `all_day` events `start`/`end` are date-only (`YYYY-MM-DD`); otherwise they're
+UTC instants (`YYYY-MM-DDThh:mm:ssZ`). Recurrence rules and attendees are not yet
+modelled (a recurring series is seen through its occurrences within the window).
+
+## Running locally
+
+```bash
+uv sync
+cp .env.example .env   # set CALENDAR_SERVER_BEARER_TOKENS at minimum
+uv run apple-calendar-server
+```
+
+First run triggers a macOS permission dialog for Calendar access — approve it once.
+
+## Installing as a LaunchAgent
+
+```bash
+./scripts/install_service.sh    # ./scripts/uninstall_service.sh to remove
+```
+
+Must run as a **LaunchAgent** (`gui/<uid>` domain), not a LaunchDaemon — Calendar's
+TCC permission is granted per logged-in user in a GUI session; a root-owned system
+daemon never sees the prompt.
+
+### Why the interpreter is code-signed (permission stability)
+
+macOS TCC grants Calendar access to a **code identity**. An unsigned or
+ad-hoc-signed Python interpreter is identified only by its `cdhash`, which changes
+on every `uv sync`, venv rebuild, or Python patch bump — so the grant silently
+reverts to *denied*, and a headless LaunchAgent can never re-prompt.
+
+The fix (identical to apple-reminders-server):
+
+- The LaunchAgent launches the venv interpreter directly
+  (`.venv/bin/python3 -m apple_calendar_server.main`), never via `uv run`.
+- `scripts/setup_signing_cert.sh` creates a long-lived self-signed code-signing
+  cert once; `scripts/sign_runtime.sh` signs the interpreter with a fixed
+  identifier (`com.awfulwoman.apple-calendar-server`) so TCC matches the Designated
+  Requirement, not the cdhash — the grant then survives rebuilds. Re-run
+  `sign_runtime.sh` after any manual rebuild; the infra role runs it on every deploy.
+- `.python-version` is pinned to an exact patch so uv stops auto-swapping Python.
+
+You still approve Calendar access **once** at first launch
+(System Settings › Privacy & Security › Calendars). After that it persists.
+
+## API
+
+All endpoints require `Authorization: Bearer <token>` (one of
+`CALENDAR_SERVER_BEARER_TOKENS`).
+
+| Method | Path | |
+|---|---|---|
+| GET | `/events?start=&end=&calendar=&since=` | List events in a window (optionally filtered) |
+| GET | `/events/{id}` | Fetch one |
+| PUT | `/events/{id}` | Upsert (last-write-wins on `updated_at`, `409` + current on stale) |
+| DELETE | `/events/{id}` | Soft delete (tombstone) |
+| GET | `/calendars` | List writable calendars |
+| POST | `/admin/gc_tombstones` | Prune tombstones older than `older_than_days` (default 30) |
+
+## Testing
+
+```bash
+uv run pytest
+```
+
+EventKit calls are mocked (`tests/conftest.py`'s `FakeEventKit`) — no permission
+prompt, no real Calendar data touched. `apple_calendar_server/eventkit_client.py`
+is the only module that imports EventKit directly, kept thin so it's the one thing
+that needs occasional live verification against real Calendar.app.
