@@ -16,6 +16,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 IDENTITY_CN="awfulwoman-apple-calendar-server-signing"
 BUNDLE_ID="com.awfulwoman.apple-calendar-server"
+KEYCHAIN="${KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+
+# Unlock the login keychain so codesign can reach the signing key headlessly
+# (over SSH it's locked). KEYCHAIN_PASSWORD is the account login password (vault).
+if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
+    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+fi
 
 VENV_PY="$REPO_DIR/.venv/bin/python3"
 if [ ! -e "$VENV_PY" ]; then

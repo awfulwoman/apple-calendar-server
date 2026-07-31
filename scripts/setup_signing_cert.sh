@@ -13,16 +13,19 @@ set -euo pipefail
 #
 # Run this ONCE on the machine that runs the service (Malcolm), as the user the
 # LaunchAgent runs as (so the key lands in that user's login keychain). The
-# private key never leaves the keychain. Idempotent: a no-op if it already exists.
+# private key never leaves the keychain. Idempotent: if a complete identity
+# already exists it is kept (never regenerated — a new cert would change the DR
+# and break the TCC grant).
 #
 # A self-signed cert must also be TRUSTED for code signing before codesign will
-# use it — that requires admin rights, so it's a SEPARATE step (the infra role
-# does it with `sudo security add-trusted-cert`; see the note printed at the end).
-# This script persists the public cert to CERT_STORE so that step can find it.
+# use it — that needs admin rights, so it's a SEPARATE step (the infra role does
+# it with `sudo security add-trusted-cert`). This script persists the public cert
+# to CERT_STORE so that step can find it.
 #
-# Automation (infra): pass KEYCHAIN_PASSWORD (e.g. from Ansible vault) so the
-# key partition list is set non-interactively. Without it, the first codesign
-# use will show a one-time keychain prompt — click "Always Allow".
+# KEYCHAIN_PASSWORD (the account login password, from vault) is required for a
+# non-interactive/headless run: over SSH the login keychain is locked, so
+# importing key material fails with "User interaction is not allowed" unless we
+# unlock it first. It's also used for set-key-partition-list.
 
 IDENTITY_CN="awfulwoman-apple-calendar-server-signing"
 KEYCHAIN="${KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
@@ -31,12 +34,22 @@ VALID_DAYS="${VALID_DAYS:-3650}"
 
 mkdir -p "$(dirname "$CERT_STORE")"
 
-if security find-certificate -c "$IDENTITY_CN" "$KEYCHAIN" >/dev/null 2>&1; then
-    # Make sure the public cert is on disk for the trust step, even on re-runs.
+# Unlock first — over SSH (no GUI login) the keychain is locked and any operation
+# touching private-key material would fail with "User interaction is not allowed".
+if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
+    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+fi
+
+# A COMPLETE identity (cert+key) already present? Keep it — never regenerate.
+if security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY_CN"; then
     [ -f "$CERT_STORE" ] || security find-certificate -c "$IDENTITY_CN" -p "$KEYCHAIN" > "$CERT_STORE"
     echo "Signing identity '$IDENTITY_CN' already present in $KEYCHAIN — nothing to do."
     exit 0
 fi
+
+# Clear any orphaned cert/key from a prior partial run so the import below is clean.
+security delete-identity -c "$IDENTITY_CN" "$KEYCHAIN" >/dev/null 2>&1 || true
+security delete-certificate -c "$IDENTITY_CN" "$KEYCHAIN" >/dev/null 2>&1 || true
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -76,8 +89,8 @@ if [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
     security set-key-partition-list -S apple-tool:,apple:,codesign: \
         -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 else
-    echo "NOTE: KEYCHAIN_PASSWORD not set — skipped set-key-partition-list."
-    echo "      The first codesign use will prompt once; click 'Always Allow'."
+    echo "NOTE: KEYCHAIN_PASSWORD not set — skipped unlock + set-key-partition-list."
+    echo "      Run this in a GUI session, or codesign will prompt/fail headlessly."
 fi
 
 echo "Created self-signed code-signing identity '$IDENTITY_CN' (valid ${VALID_DAYS} days)."
