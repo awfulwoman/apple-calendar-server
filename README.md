@@ -75,19 +75,22 @@ logged into a GUI session — a headless box can never hold the grant.
 
 macOS TCC grants Calendar access to a **code identity**. An unsigned or
 ad-hoc-signed Python interpreter is identified only by its `cdhash`, which changes
-on every `uv sync`, venv rebuild, or Python patch bump — so the grant silently
-reverts to *denied*, and a headless LaunchAgent can never re-prompt.
+on every `uv sync`, venv rebuild, or Python patch bump — so an interpreter signed
+that way would have its grant silently revert to *denied* on the next rebuild, and
+a headless LaunchAgent can never re-prompt to recover it.
 
-The fix (identical to apple-reminders-server):
+To keep the grant stable across rebuilds (same approach as apple-reminders-server):
 
-- The LaunchAgent launches the venv interpreter directly
-  (`.venv/bin/python3 -m apple_calendar_server.main`), never via `uv run`.
+- The LaunchAgent execs the venv interpreter directly
+  (`.venv/bin/python3 -m apple_calendar_server.main`), not via `uv run` — `uv run`
+  re-resolves the venv and can swap the interpreter out from under it.
 - `scripts/setup_signing_cert.sh` creates a long-lived self-signed code-signing
   cert once; `scripts/sign_runtime.sh` signs the interpreter with a fixed
   identifier (`com.awfulwoman.apple-calendar-server`) so TCC matches the Designated
-  Requirement, not the cdhash — the grant then survives rebuilds. Re-run
+  Requirement, not the cdhash, and the grant survives rebuilds. Re-run
   `sign_runtime.sh` after any manual rebuild.
-- `.python-version` is pinned to an exact patch so uv stops auto-swapping Python.
+- `.python-version` is pinned to an exact patch so uv doesn't swap the interpreter
+  underneath the grant.
 
 You still approve Calendar access **once** at first launch
 (System Settings › Privacy & Security › Calendars). After that it persists.
