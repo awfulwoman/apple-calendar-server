@@ -11,7 +11,7 @@ set -euo pipefail
 # with a fixed certificate + identifier makes TCC match on the Designated
 # Requirement instead, so the grant survives rebuilds. See sign_runtime.sh.
 #
-# Run this ONCE on the machine that runs the service (Malcolm), as the user the
+# Run this ONCE on the machine that runs the service, as the user the
 # LaunchAgent runs as (so the key lands in that user's login keychain). The
 # private key never leaves the keychain. Idempotent: if a complete identity
 # already exists it is kept (never regenerated — a new cert would change the DR

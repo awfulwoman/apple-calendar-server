@@ -1,4 +1,4 @@
-"""Local bookkeeping EventKit can't hold itself: the mapping from Gateway's
+"""Local bookkeeping EventKit can't hold itself: the mapping from a caller's
 client-chosen `id` to EventKit's system-assigned `calendarItemIdentifier`, the
 app-authoritative `updated_at` used for LWW (EventKit's lastModifiedDate is
 system-set, not caller-set), and tombstones (EventKit has no CalDAV-style

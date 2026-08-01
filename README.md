@@ -1,14 +1,12 @@
 # apple-calendar-server
 
 A small authorised REST API in front of the real macOS Calendar app (via
-`EventKit`), so [`gateway`](https://github.com/awfulwoman/gateway)'s calendar can be
-backed by the Calendar app the user actually uses — on any device, via Siri, the
-widget, or the Calendar UI — instead of a synthetic store nothing else syncs with.
-It's the sibling of
+`EventKit`), so client applications can read and write the Calendar the user
+actually uses — on any device, via Siri, the widget, or the Calendar UI —
+instead of a synthetic store nothing else syncs with. It's the sibling of
 [`apple-reminders-server`](https://github.com/awfulwoman/apple-reminders-server) and
 follows the same principles (thin EventKit wrapper, sidecar SQLite for bookkeeping,
-LWW + tombstones, native-edit adoption, stable code-signed interpreter). Runs on
-**Malcolm** (`apple-macmini-m4-16gb-malcolm`), the always-on Mac.
+LWW + tombstones, native-edit adoption, stable code-signed interpreter).
 
 **Multiple calendars** are first-class: events carry a `calendar`, `GET /events`
 can be filtered by it, writes create/target a named calendar, and `GET /calendars`
@@ -70,7 +68,8 @@ First run triggers a macOS permission dialog for Calendar access — approve it 
 
 Must run as a **LaunchAgent** (`gui/<uid>` domain), not a LaunchDaemon — Calendar's
 TCC permission is granted per logged-in user in a GUI session; a root-owned system
-daemon never sees the prompt.
+daemon never sees the prompt. In practice that means running it on a Mac that stays
+logged into a GUI session — a headless box can never hold the grant.
 
 ### Why the interpreter is code-signed (permission stability)
 
@@ -87,7 +86,7 @@ The fix (identical to apple-reminders-server):
   cert once; `scripts/sign_runtime.sh` signs the interpreter with a fixed
   identifier (`com.awfulwoman.apple-calendar-server`) so TCC matches the Designated
   Requirement, not the cdhash — the grant then survives rebuilds. Re-run
-  `sign_runtime.sh` after any manual rebuild; the infra role runs it on every deploy.
+  `sign_runtime.sh` after any manual rebuild.
 - `.python-version` is pinned to an exact patch so uv stops auto-swapping Python.
 
 You still approve Calendar access **once** at first launch

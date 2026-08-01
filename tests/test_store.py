@@ -116,7 +116,7 @@ def test_list_events_adopts_natively_created(store_module, fake_ek):
     results = store_module.list_events()
     assert len(results) == 1
     assert results[0]["title"] == "Native meeting"
-    assert results[0]["id"] != native.calendarItemIdentifier()  # gateway id, not EventKit's
+    assert results[0]["id"] != native.calendarItemIdentifier()  # our own id, not EventKit's
 
     # Second call reuses the same adopted id rather than adopting again.
     again = store_module.list_events()

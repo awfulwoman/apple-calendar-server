@@ -1,7 +1,7 @@
 """Events store backed by real EventKit content plus the `sidecar` bookkeeping
 table. Public interface mirrors the reminders server's store (get/list/upsert/
-soft_delete/gc_tombstones/now_utc/now_after/new_id/Stale) so Gateway can treat it
-as the same kind of LWW-with-tombstones backend.
+soft_delete/gc_tombstones/now_utc/now_after/new_id/Stale) so a caller can treat
+it as the same kind of LWW-with-tombstones backend.
 
 Events created outside this service — the Calendar app, another device — are
 "adopted" on first sight: the first list/get call that observes an EKEvent with no
