@@ -3,6 +3,8 @@ TCC/Calendar dependency, so the store/http tests run anywhere. Dates flowing in
 and out are real Foundation NSDate objects (they need no permission), so the
 window/date logic is exercised for real."""
 from __future__ import annotations
+import os
+import time
 import uuid
 import pytest
 
@@ -97,12 +99,16 @@ class FakeEventKit:
     def __init__(self):
         self.events: dict[str, FakeEvent] = {}
         self.calendars: dict[str, FakeCalendar] = {}
+        self.refresh_calls = 0
 
     def new_store(self):
         return self
 
     def request_access(self, store):
         pass
+
+    def refresh_sources(self, store):
+        self.refresh_calls += 1
 
     def fetch_events(self, store, start_date, end_date, calendars=None):
         ws, we = start_date.timeIntervalSince1970(), end_date.timeIntervalSince1970()
@@ -141,6 +147,22 @@ class FakeEventKit:
     def _clock(self):
         from Foundation import NSDate
         return NSDate.date()
+
+
+@pytest.fixture(params=["Europe/Berlin", "America/New_York"])
+def tz(request):
+    """Pins the process timezone to one either side of UTC. All-day events are
+    anchored to *local* midnight, so any UTC/local confusion shifts their date in
+    opposite directions on the two — and neither would show up on a UTC runner."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = request.param
+    time.tzset()
+    yield request.param
+    if previous is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
 
 
 @pytest.fixture

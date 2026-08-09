@@ -69,10 +69,12 @@ def _default_window() -> tuple[str, str]:
 
 
 def _parse_iso(value: str) -> datetime:
-    """Accepts a date-only 'YYYY-MM-DD' (all-day) or 'YYYY-MM-DDThh:mm:ssZ' instant,
-    always as UTC."""
+    """Accepts a date-only 'YYYY-MM-DD' (all-day) or a 'YYYY-MM-DDThh:mm:ssZ' instant.
+    An instant is UTC as written; a bare date is *local* midnight, because that is
+    where EventKit anchors an all-day event. Reading it as UTC midnight puts it hours
+    into the wrong day everywhere except a UTC host."""
     if len(value) == 10:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return datetime.strptime(value, "%Y-%m-%d").astimezone()
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
@@ -88,10 +90,14 @@ def _nsdate_to_iso(nsdate) -> str | None:
 
 
 def _nsdate_to_date(nsdate) -> str | None:
+    """The calendar day an all-day event's boundary falls on, read in local time —
+    the mirror of `_parse_iso`. EventKit gives local midnight and 23:59:59, both of
+    which name the day before under UTC east of Greenwich and the day after west
+    of it."""
     if nsdate is None:
         return None
     ts = nsdate.timeIntervalSince1970()
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 def _event_to_dict(event, id: str, updated_at: str) -> dict:
@@ -154,6 +160,7 @@ def _content_start_in_window(content: dict | None, start_ts: float, end_ts: floa
 
 
 def get(id: str) -> dict | None:
+    ek.refresh_sources(_store)
     row = _sidecar.by_id(id)
     if row is None:
         return None
@@ -175,6 +182,7 @@ def list_events(
     since: str | None = None,
     include_deleted: bool = True,
 ) -> list[dict]:
+    ek.refresh_sources(_store)
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end

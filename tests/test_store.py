@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 import pytest
+from Foundation import NSDate
 
 
 def _new_event(store_module, **overrides):
@@ -191,3 +194,84 @@ def test_gc_tombstones_removes_old_only(store_module):
     )
     assert store_module.gc_tombstones(older_than_days=30) == 1
     assert store_module.get(tombstone["id"]) is None
+
+
+# --- All-day events and the local/UTC boundary -------------------------------
+#
+# EventKit anchors an all-day event to *local* midnight and ends it one second
+# before the next one. Reading those NSDates back in UTC names the wrong day for
+# any non-UTC system timezone, so these tests pin the timezone explicitly.
+
+def _local(y, m, d, hour=0, minute=0, second=0):
+    return datetime(y, m, d, hour, minute, second).astimezone()
+
+
+def _utc(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _save_native_all_day(fake_ek, title, y, m, d, calendar="Deutsche Feiertage"):
+    """An all-day event as EventKit hands it back when it was created elsewhere —
+    Calendar.app, another device — rather than through this service."""
+    event = fake_ek.new_event(None)
+    event.setTitle_(title)
+    event.setAllDay_(True)
+    event.setCalendar_(fake_ek.get_or_create_calendar(None, calendar))
+    event.setStartDate_(NSDate.dateWithTimeIntervalSince1970_(_local(y, m, d).timestamp()))
+    event.setEndDate_(NSDate.dateWithTimeIntervalSince1970_(_local(y, m, d, 23, 59, 59).timestamp()))
+    fake_ek.save_event(None, event)
+    return event
+
+
+def test_native_all_day_event_reports_the_day_it_falls_on(tz, store_module, fake_ek):
+    _save_native_all_day(fake_ek, "Mariä Himmelfahrt", 2026, 8, 15)
+
+    events = store_module.list_events(start="2026-08-01T00:00:00Z", end="2026-08-31T00:00:00Z")
+    event = next(e for e in events if e["title"] == "Mariä Himmelfahrt")
+
+    assert event["all_day"] is True
+    assert event["start"] == "2026-08-15"
+    assert event["end"] == "2026-08-15"
+
+
+def test_upsert_anchors_an_all_day_event_to_local_midnight(tz, store_module, fake_ek):
+    event = _new_event(store_module, all_day=True, start="2026-08-02", end="2026-08-02")
+    store_module.upsert(event)
+
+    saved = next(iter(fake_ek.events.values()))
+    assert saved.startDate().timeIntervalSince1970() == _local(2026, 8, 2).timestamp()
+
+
+def test_window_ending_before_an_all_day_event_does_not_tombstone_it(tz, store_module, fake_ek):
+    """A window that stops short of the event must leave it alone. Comparing its
+    cached bare-date start against the window in the wrong timezone made it look
+    in-range but absent, so it was tombstoned and re-adopted under a fresh id on
+    the next wide query — churning a new row per request."""
+    _save_native_all_day(fake_ek, "Mariä Himmelfahrt", 2026, 8, 15)
+    wide = {"start": "2026-08-01T00:00:00Z", "end": "2026-08-31T00:00:00Z"}
+    adopted = next(
+        e for e in store_module.list_events(**wide) if e["title"] == "Mariä Himmelfahrt"
+    )
+
+    # The previous two local days — the event starts one second after this ends.
+    store_module.list_events(
+        start=_utc(_local(2026, 8, 13)), end=_utc(_local(2026, 8, 14, 23, 59, 59))
+    )
+
+    after = [e for e in store_module.list_events(**wide) if e["title"] == "Mariä Himmelfahrt"]
+    assert [e["id"] for e in after] == [adopted["id"]]
+    assert after[0]["deleted"] is False
+
+
+def test_reads_refresh_the_remote_sources_first(store_module, fake_ek):
+    """Without this the service happily serves whatever Calendar.app last polled,
+    which can be ~15 minutes old, and no health check can tell the difference."""
+    event = _new_event(store_module)
+    store_module.upsert(event)
+    fake_ek.refresh_calls = 0
+
+    store_module.list_events()
+    assert fake_ek.refresh_calls == 1
+
+    store_module.get(event["id"])
+    assert fake_ek.refresh_calls == 2

@@ -54,6 +54,18 @@ def request_access(store: EK.EKEventStore) -> None:
         raise AccessDenied(f"Calendar access not granted: {error}")
 
 
+def refresh_sources(store: EK.EKEventStore) -> None:
+    """Ask EventKit to pull the remote accounts now. Calendar.app otherwise polls on
+    its own schedule — ~15 minutes for Google/CalDAV, with no `RefreshInterval` default
+    set — and EventKit only ever reads that local store, so a query can be minutes
+    behind reality while the service reports perfect health.
+
+    The refresh runs asynchronously, so it does not hold up the current request: an
+    event created seconds ago still tends to land on the *next* query rather than this
+    one. It bounds staleness by the request rate rather than by Calendar.app's timer."""
+    store.refreshSourcesIfNecessary()
+
+
 def fetch_events(store: EK.EKEventStore, start_date, end_date, calendars=None) -> list:
     """Events overlapping [start_date, end_date]. EventKit has no all-events query and
     caps the span at ~4 years; `calendars=None` means every calendar."""

@@ -50,6 +50,23 @@ For `all_day` events `start`/`end` are date-only (`YYYY-MM-DD`); otherwise they'
 UTC instants (`YYYY-MM-DDThh:mm:ssZ`). Recurrence rules and attendees are not yet
 modelled (a recurring series is seen through its occurrences within the window).
 
+A date-only value is the day **in the server's local timezone**, because that is
+where EventKit anchors an all-day event: its `startDate` is local midnight and its
+`endDate` is 23:59:59 that evening. Reading those instants as UTC instead names the
+day before east of Greenwich — an event on the 15th reported as the 14th — and it
+also makes the cached start disagree with the real one, so a window that stops short
+of the event looks like a native deletion and tombstones it.
+
+## Remote accounts are refreshed on every read
+
+EventKit only ever reads Calendar.app's *local* store, and Calendar.app polls remote
+accounts on its own schedule (~15 minutes for Google/CalDAV). Reads therefore call
+`refreshSourcesIfNecessary()` first, which bounds staleness by the request rate rather
+than by that timer. The refresh is asynchronous, so a just-created event still tends
+to appear on the next request rather than the one that triggered the refresh. Note
+that no health check can detect this class of problem: the service is up and returns
+`200 OK` the whole time it is serving stale data.
+
 ## Running locally
 
 ```bash
