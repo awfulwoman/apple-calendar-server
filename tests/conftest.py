@@ -111,12 +111,17 @@ class FakeEventKit:
         self.refresh_calls += 1
 
     def fetch_events(self, store, start_date, end_date, calendars=None):
+        """Real EventKit's predicate matches events that *overlap* [start, end], not
+        only ones starting inside it — an event already in progress at window-open
+        is still returned."""
         ws, we = start_date.timeIntervalSince1970(), end_date.timeIntervalSince1970()
         out = []
         for e in self.events.values():
             if e._removed or e._start is None:
                 continue
-            if ws <= e._start.timeIntervalSince1970() <= we:
+            event_start = e._start.timeIntervalSince1970()
+            event_end = e._end.timeIntervalSince1970() if e._end is not None else event_start
+            if event_start <= we and event_end >= ws:
                 out.append(e)
         return out
 

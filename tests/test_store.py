@@ -81,6 +81,43 @@ def test_upsert_rejects_end_before_start(store_module):
         store_module.upsert(e)
 
 
+def test_upsert_rejects_malformed_updated_at(store_module):
+    """`updated_at` is the field the whole LWW protocol turns on, and it is compared
+    as a string. An unparseable one is not a cosmetic problem — see the lockout test
+    below for what it costs."""
+    e = _new_event(store_module, updated_at="not-a-timestamp")
+    with pytest.raises(ValueError):
+        store_module.upsert(e)
+
+
+def test_malformed_updated_at_cannot_lock_an_event_out_of_future_writes(store_module):
+    """Every real ISO timestamp starts with a digit, so it sorts *below* almost any
+    junk string. Store junk once and every later well-formed write looks stale
+    forever — the event can never again be updated or deleted through the API."""
+    e = _new_event(store_module, updated_at="not-a-timestamp")
+    try:
+        store_module.upsert(e)
+    except ValueError:
+        pass  # rejected up front: the outcome we want
+
+    stored = store_module.upsert(_new_event(store_module, id=e["id"], title="Standup v2"))
+    assert stored["title"] == "Standup v2"
+
+
+def test_upsert_missing_updated_at_writes_nothing_to_the_calendar(store_module, fake_ek):
+    """The absent field is currently read *after* the event has already been saved,
+    so the caller is told the write failed while their real Calendar disagrees — and
+    the orphan is later adopted under a different id."""
+    e = _new_event(store_module)
+    del e["updated_at"]
+
+    with pytest.raises(ValueError):
+        store_module.upsert(e)
+
+    assert fake_ek.events == {}
+    assert store_module._sidecar.all() == []
+
+
 def test_soft_delete_produces_tombstone(store_module):
     e = _new_event(store_module, title="Standup")
     store_module.upsert(e)
@@ -99,6 +136,16 @@ def test_soft_delete_rejects_stale_updated_at(store_module):
         store_module.soft_delete(e["id"], updated_at=stored["updated_at"])
     assert exc.value.current["title"] == "Standup"
     assert store_module.get(e["id"])["deleted"] is False
+
+
+def test_soft_delete_rejects_malformed_updated_at(store_module):
+    """Same hole on the delete path, with an extra cost: the junk timestamp is
+    written onto the tombstone, which also puts the row permanently out of reach of
+    `gc_tombstones` (it compares against an ISO cutoff)."""
+    e = _new_event(store_module)
+    store_module.upsert(e)
+    with pytest.raises(ValueError):
+        store_module.soft_delete(e["id"], updated_at="zzzz-garbage")
 
 
 def test_soft_delete_unknown_id_raises(store_module):
@@ -140,6 +187,45 @@ def test_list_events_self_heals_native_deletion(store_module, fake_ek):
     all_results = store_module.list_events(include_deleted=True)
     assert all_results[0]["deleted"] is True
     assert all_results[0]["title"] == "Standup"
+
+
+def test_reappearing_event_revives_its_original_id(store_module, fake_ek):
+    """An event can leave the local store and come back: a remote account mid-resync,
+    a trip through the Trash. Re-adopting it under a fresh id makes every client see a
+    delete plus an unrelated create, and strands the old id under a tombstone that is
+    never reconciled."""
+    e = _new_event(store_module, title="Standup")
+    store_module.upsert(e)
+    ek_identifier = store_module._sidecar.by_id(e["id"])["ek_identifier"]
+
+    fake_ek.events[ek_identifier]._removed = True
+    store_module.list_events()  # tombstones it
+
+    fake_ek.events[ek_identifier]._removed = False
+    results = store_module.list_events(include_deleted=False)
+
+    assert [r["id"] for r in results] == [e["id"]]
+    assert store_module.get(e["id"])["deleted"] is False
+    assert len(store_module._sidecar.all()) == 1  # no orphaned tombstone row
+
+
+def test_window_query_returns_an_event_already_in_progress(store_module, fake_ek):
+    """EventKit's predicate matches events that *overlap* the window, not only those
+    starting inside it, so a long event running through the window is returned.
+
+    This currently fails in the fake, not in production: `FakeEventKit.fetch_events`
+    filters on start alone. That happens to be the same assumption
+    `_content_start_in_window` makes, so the suite cannot presently tell whether that
+    guard agrees with the real predicate — the one thing it exists to get right."""
+    e = _new_event(
+        store_module, title="Conference", start="2026-08-01T00:00:00Z", end="2026-08-20T00:00:00Z"
+    )
+    store_module.upsert(e)
+
+    results = store_module.list_events(
+        start="2026-08-10T00:00:00Z", end="2026-08-11T00:00:00Z", include_deleted=False
+    )
+    assert [r["title"] for r in results] == ["Conference"]
 
 
 def test_list_events_does_not_tombstone_out_of_window(store_module):

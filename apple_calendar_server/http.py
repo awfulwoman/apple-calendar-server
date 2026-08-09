@@ -21,8 +21,11 @@ def _authorized(request: Request) -> bool:
     header = request.headers.get("authorization", "")
     if not header.startswith("Bearer "):
         return False
-    token = header[len("Bearer "):]
-    return any(hmac.compare_digest(token, t) for t in _config.bearer_tokens)
+    # Compared as bytes: `hmac.compare_digest` raises TypeError on non-ASCII `str`
+    # input, and the token here is fully caller-controlled — an unauthenticated
+    # request must fail closed (401), not crash the handler.
+    token = header[len("Bearer "):].encode("utf-8")
+    return any(hmac.compare_digest(token, t.encode("utf-8")) for t in _config.bearer_tokens)
 
 
 def _err(status: int, code: str, message: str) -> JSONResponse:
@@ -93,6 +96,8 @@ async def delete_event(request: Request) -> JSONResponse:
         return _err(404, "not_found", f"no event with id {id!r}")
     except store.Stale as e:
         return JSONResponse({"current": e.current}, status_code=409)
+    except ValueError as e:
+        return _err(400, "validation_error", str(e))
     return JSONResponse(tombstone)
 
 
@@ -105,8 +110,17 @@ async def get_calendars(request: Request) -> JSONResponse:
 async def gc_tombstones(request: Request) -> JSONResponse:
     if not _authorized(request):
         return _err(401, "unauthorized", "missing or invalid bearer token")
-    body, _ = await _json_body(request) if await request.body() else ({}, None)
-    older_than_days = int(body.get("older_than_days", 30))
+    body = {}
+    if await request.body():
+        body, error = await _json_body(request)
+        if error:
+            return error
+    try:
+        older_than_days = int(body.get("older_than_days", 30))
+    except (TypeError, ValueError):
+        return _err(400, "validation_error", "older_than_days must be an integer")
+    if older_than_days < 0:
+        return _err(400, "validation_error", "older_than_days must not be negative")
     removed = store.gc_tombstones(older_than_days=older_than_days)
     return JSONResponse({"removed": removed})
 

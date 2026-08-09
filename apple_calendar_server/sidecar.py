@@ -24,7 +24,9 @@ CREATE INDEX IF NOT EXISTS idx_events_ek_identifier ON events(ek_identifier);
 class Sidecar:
     def __init__(self, db_path: str):
         path = os.path.expanduser(db_path)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

@@ -32,6 +32,17 @@ def test_rejects_wrong_token(app):
     assert client.get("/events", headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
+def test_non_ascii_token_is_rejected_rather_than_crashing(app):
+    """Headers travel as latin-1, so Starlette can hand the handler a token with
+    non-ASCII characters — and `hmac.compare_digest` refuses to compare those,
+    raising TypeError out of an endpoint any unauthenticated caller can reach.
+    Sent as raw bytes because an httpx `str` header would fail encoding client-side
+    and never exercise the server at all."""
+    client = TestClient(app)
+    resp = client.get("/events", headers={b"Authorization": b"Bearer t\xf6k\xe9n"})
+    assert resp.status_code == 401
+
+
 def test_put_get_list_roundtrip(app, store_module):
     client = TestClient(app)
     id = store_module.new_id()
@@ -60,6 +71,17 @@ def test_put_stale_returns_409(app, store_module):
     resp = client.put(f"/events/{id}", json={**body, "title": "Standup v2"}, headers=AUTH)
     assert resp.status_code == 409
     assert resp.json()["current"]["title"] == "Standup"
+
+
+def test_put_rejects_malformed_updated_at(app, store_module):
+    """The boundary a real client actually hits. Accepting this stores a timestamp
+    that sorts above every ISO one, locking the event out of all later writes."""
+    client = TestClient(app)
+    id = store_module.new_id()
+    resp = client.put(
+        f"/events/{id}", json=_body(store_module, updated_at="not-a-timestamp"), headers=AUTH
+    )
+    assert resp.status_code == 400
 
 
 def test_get_missing_returns_404(app):
@@ -105,3 +127,41 @@ def test_gc_tombstones_endpoint(app, store_module):
     resp = client.post("/admin/gc_tombstones", json={"older_than_days": 30}, headers=AUTH)
     assert resp.status_code == 200
     assert resp.json()["removed"] == 1
+
+
+def _make_tombstone(client, store_module) -> str:
+    id = store_module.new_id()
+    client.put(f"/events/{id}", json=_body(store_module), headers=AUTH)
+    client.delete(f"/events/{id}", headers=AUTH)
+    return id
+
+
+def test_gc_rejects_negative_older_than_days(app, store_module):
+    """A negative age puts the cutoff in the future, so `updated_at < cutoff` matches
+    every tombstone — one request wipes the delete-propagation state of every client
+    still syncing."""
+    client = TestClient(app)
+    id = _make_tombstone(client, store_module)
+
+    resp = client.post("/admin/gc_tombstones", json={"older_than_days": -99999}, headers=AUTH)
+    assert resp.status_code == 400
+    assert client.get(f"/events/{id}", headers=AUTH).status_code == 200  # tombstone survives
+
+
+def test_gc_rejects_non_integer_older_than_days(app, store_module):
+    """`int(body.get(...))` raises straight out of the handler."""
+    client = TestClient(app)
+    resp = client.post("/admin/gc_tombstones", json={"older_than_days": "abc"}, headers=AUTH)
+    assert resp.status_code == 400
+
+
+def test_gc_rejects_malformed_json(app, store_module):
+    """This handler discards the parse error the other endpoints return, so a body
+    that is not JSON at all quietly runs the default prune instead of failing."""
+    client = TestClient(app)
+    resp = client.post(
+        "/admin/gc_tombstones",
+        content=b"{not json",
+        headers={**AUTH, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400

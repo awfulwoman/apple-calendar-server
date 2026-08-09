@@ -59,6 +59,16 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _is_valid_updated_at(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        return True
+    except ValueError:
+        return False
+
+
 def _default_window() -> tuple[str, str]:
     past = _config.default_window_past_days if _config else 30
     future = _config.default_window_future_days if _config else 365
@@ -138,6 +148,20 @@ def _observe(event, row: dict) -> dict:
     return d
 
 
+def _revive(event, row: dict) -> dict:
+    """A live EKEvent whose sidecar row was previously self-healed into a tombstone
+    (native absence during a windowed list) but has since reappeared — a remote
+    account mid-resync, a trip through the Trash. Un-tombstone the existing row
+    rather than adopting a fresh id, so the event keeps a stable identity across
+    the round trip. `ek_identifier` is kept on self-healed tombstones (unlike an
+    explicit soft_delete's) precisely so this lookup by identifier can still find
+    them."""
+    updated_at = now_after(row["updated_at"])
+    d = _event_to_dict(event, row["id"], updated_at)
+    _sidecar.put(row["id"], row["ek_identifier"], updated_at, deleted=False, content=d)
+    return d
+
+
 def _tombstone_dict(row: dict) -> dict:
     d = dict(row["content"]) if row["content"] else {"id": row["id"], "title": ""}
     d["id"] = row["id"]
@@ -168,10 +192,13 @@ def get(id: str) -> dict | None:
         return _tombstone_dict(row)
     event = ek.event_by_identifier(_store, row["ek_identifier"]) if row["ek_identifier"] else None
     if event is None:
-        # Deleted natively (outside soft_delete) since we last saw it — self-heal into a tombstone.
+        # Deleted natively (outside soft_delete) since we last saw it — self-heal into a
+        # tombstone. Keep ek_identifier (unlike soft_delete's explicit None) so a later
+        # list_events can revive this row if the event reappears rather than re-adopting
+        # it under a fresh id.
         updated_at = now_after(row["updated_at"])
-        _sidecar.put(id, None, updated_at, deleted=True)
-        return _tombstone_dict({**row, "ek_identifier": None, "updated_at": updated_at})
+        _sidecar.put(id, row["ek_identifier"], updated_at, deleted=True)
+        return _tombstone_dict({**row, "updated_at": updated_at})
     return _observe(event, row)
 
 
@@ -197,7 +224,12 @@ def list_events(
         ek_identifier = event.calendarItemIdentifier()
         seen_ek_identifiers.add(ek_identifier)
         row = _sidecar.by_ek_identifier(ek_identifier)
-        d = _adopt(event) if row is None else _observe(event, row)
+        if row is None:
+            d = _adopt(event)
+        elif row["deleted"]:
+            d = _revive(event, row)
+        else:
+            d = _observe(event, row)
         results.append(d)
 
     window_start, window_end = start_ns.timeIntervalSince1970(), end_ns.timeIntervalSince1970()
@@ -208,10 +240,11 @@ def list_events(
         elif row["ek_identifier"] not in seen_ek_identifiers and _content_start_in_window(row["content"], window_start, window_end):
             # Sidecar knows this event, its start is inside the window, yet it wasn't
             # returned live — deleted natively. (Rows outside the window are skipped:
-            # they're merely out of range.)
+            # they're merely out of range.) Keep ek_identifier so a later pass can
+            # revive this row instead of re-adopting under a fresh id.
             updated_at = now_after(row["updated_at"])
-            _sidecar.put(row["id"], None, updated_at, deleted=True)
-            results.append(_tombstone_dict({**row, "ek_identifier": None, "updated_at": updated_at}))
+            _sidecar.put(row["id"], row["ek_identifier"], updated_at, deleted=True)
+            results.append(_tombstone_dict({**row, "updated_at": updated_at}))
 
     if calendar_name:
         results = [r for r in results if r.get("calendar") == calendar_name]
@@ -236,6 +269,8 @@ def upsert(event: dict) -> dict:
         raise ValueError("end is required")
     if _parse_iso(event["end"]) < _parse_iso(event["start"]):
         raise ValueError("end must not be before start")
+    if not _is_valid_updated_at(event.get("updated_at")):
+        raise ValueError("updated_at is required and must be an ISO 8601 UTC timestamp (YYYY-MM-DDThh:mm:ssZ)")
 
     id = event["id"]
     row = _sidecar.by_id(id)
@@ -265,6 +300,8 @@ def upsert(event: dict) -> dict:
 
 
 def soft_delete(id: str, updated_at: str | None = None) -> dict:
+    if updated_at is not None and not _is_valid_updated_at(updated_at):
+        raise ValueError("updated_at must be an ISO 8601 UTC timestamp (YYYY-MM-DDThh:mm:ssZ)")
     row = _sidecar.by_id(id)
     if row is None:
         raise KeyError(f"no event with id {id!r}")
