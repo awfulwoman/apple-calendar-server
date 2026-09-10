@@ -101,11 +101,19 @@ To keep the grant stable across rebuilds (same approach as apple-reminders-serve
 - The LaunchAgent execs the venv interpreter directly
   (`.venv/bin/python3 -m apple_calendar_server.main`), not via `uv run` — `uv run`
   re-resolves the venv and can swap the interpreter out from under it.
-- `scripts/setup_signing_cert.sh` creates a long-lived self-signed code-signing
-  cert once; `scripts/sign_runtime.sh` signs the interpreter with a fixed
-  identifier (`com.awfulwoman.apple-calendar-server`) so TCC matches the Designated
-  Requirement, not the cdhash, and the grant survives rebuilds. Re-run
-  `sign_runtime.sh` after any manual rebuild.
+- The interpreter is signed with a **SHARED stable identity**.
+  `apple-reminders-server`, `apple-contacts-server` and this service all pin the
+  same `.python-version`, so uv hard-links them to one CPython file on disk.
+  `codesign --force` replaces the whole signature, so if each service signed
+  with its own identifier the last deploy would win and silently break the other
+  two TCC grants (noticed only on their next restart). All three therefore sign
+  that one file with **one** identity, `com.awfulwoman.apple-reminders-server` —
+  the Reminders, Calendars and Contacts grants are all pinned to it.
+  `apple-reminders-server` owns provisioning + trusting the cert
+  (`scripts/setup_signing_cert.sh`, its infra role deploys first); here
+  `scripts/sign_runtime.sh` just re-signs with that identity on every deploy.
+  Override `SIGNING_IDENTITY_CN` / `SIGNING_BUNDLE_ID` only for a deliberate
+  migration (`tccutil reset` all three services, then re-approve).
 - `.python-version` is pinned to an exact patch so uv doesn't swap the interpreter
   underneath the grant.
 
